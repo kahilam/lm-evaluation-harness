@@ -170,6 +170,38 @@ def test_left_truncation_is_included_in_protocol_counts():
     assert stats["truncated_requests"] == 2
 
 
+def test_string_request_retokenizes_decoded_text_before_budget_and_boundary():
+    api = LocalCompletionsAPI(
+        tokenizer_backend=None,
+        tokenized_requests=False,
+        max_length=4,
+        loglikelihood_context_overflow="truncate",
+    )
+    api.tokenizer = object()
+    api.decode_batch = MagicMock(
+        side_effect=lambda tokens: [
+            "old A" if tokens[0] == [1, 2, 3, 4] else "new A"
+        ]
+    )
+    api.tok_encode = MagicMock(
+        side_effect=lambda text: {
+            "old A": [10, 11, 12, 13, 14],
+            "new A": [20, 21, 22, 23],
+            "new": [20, 21, 22],
+            " A": [23],
+        }[text]
+    )
+    api._encode_pair = MagicMock(return_value=([20, 21, 22], [23]))
+
+    inputs, ctxlens, _ = api.batch_loglikelihood_requests(
+        [[(("prompt", " A"), [1, 2, 3], [4])]]
+    )
+
+    assert inputs == [[20, 21, 22, 23]]
+    assert ctxlens == [3]
+    api._encode_pair.assert_called_once_with("new", " A")
+
+
 def test_loglikelihood_retains_task_and_document_ids(monkeypatch):
     api = LocalCompletionsAPI(tokenizer_backend=None)
     monkeypatch.setattr(api, "_encode_pair", lambda context, continuation: ([1], [2]))

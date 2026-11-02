@@ -590,6 +590,62 @@ class TemplateAPI(TemplateLM):
                         len(context_enc) + len(continuation_enc) - self.max_length,
                     )
 
+                # String-based APIs decode these tokens in create_message before
+                # sending them. Decoding is not necessarily lossless for the
+                # tokenizer, so base the budget and prompt boundary on the text
+                # that will actually be sent.
+                if not self.tokenized_requests and self.tokenizer is not None:
+                    sent_text = self.decode_batch([inp])[0]
+                    sent_tokens = self.tok_encode(sent_text)
+                    retokenized_was_truncated = len(sent_tokens) > self.max_length
+                    if len(sent_tokens) > self.max_length:
+                        if self.loglikelihood_context_overflow == "error":
+                            raise ValueError(
+                                f"Loglikelihood input has {len(sent_tokens)} tokens, "
+                                f"exceeding the {self.max_length}-token input budget "
+                                "after decoding and re-tokenizing. No truncated "
+                                "request was sent."
+                            )
+                        sent_tokens = sent_tokens[-self.max_length :]
+                        if self.loglikelihood_context_overflow == "middle":
+                            continuation = (
+                                cache_key[1] if isinstance(cache_key, tuple) else ""
+                            )
+                            continuation_tokens = self.tok_encode(continuation)
+                            prompt_budget = self.max_length - len(continuation_tokens)
+                            if prompt_budget < 2:
+                                raise ValueError(
+                                    "Answer-choice continuation leaves fewer than "
+                                    "two prompt tokens, so middle truncation cannot "
+                                    "preserve both prompt edges."
+                                )
+                            head_length = (prompt_budget + 1) // 2
+                            tail_length = prompt_budget // 2
+                            sent_tokens = sent_tokens[:head_length] + (
+                                sent_tokens[-tail_length:] if tail_length else []
+                            )
+                        sent_text = self.decode_batch([sent_tokens])[0]
+                        sent_tokens = self.tok_encode(sent_text)
+                        # A decode/re-encode pair can change the count again. Keep
+                        # the final text within the budget before sending it.
+                        if len(sent_tokens) > self.max_length:
+                            sent_tokens = sent_tokens[-self.max_length :]
+                            sent_text = self.decode_batch([sent_tokens])[0]
+                            sent_tokens = self.tok_encode(sent_text)
+
+                    inp = sent_tokens
+                    continuation = cache_key[1] if isinstance(cache_key, tuple) else ""
+                    if continuation and sent_text.endswith(continuation):
+                        prompt_text = sent_text[: -len(continuation)]
+                        ctxlen = len(self._encode_pair(prompt_text, continuation)[0])
+                    else:
+                        ctxlen = min(ctxlen, len(inp))
+                    was_truncated = (
+                        was_truncated
+                        or retokenized_was_truncated
+                        or len(inp) < len(context_enc) + len(continuation_enc)
+                    )
+
                 if was_truncated and self.longbench_truncation_stats is not None:
                     if sample_id:
                         example_key = json.dumps(sample_id, separators=(",", ":"))
