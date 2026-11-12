@@ -606,11 +606,22 @@ class TemplateAPI(TemplateLM):
                                 "after decoding and re-tokenizing. No truncated "
                                 "request was sent."
                             )
-                        sent_tokens = sent_tokens[-self.max_length :]
                         if self.loglikelihood_context_overflow == "middle":
                             continuation = (
                                 cache_key[1] if isinstance(cache_key, tuple) else ""
                             )
+                            if continuation and not sent_text.endswith(continuation):
+                                raise ValueError(
+                                    "Cannot safely separate the answer-choice "
+                                    "continuation from the decoded likelihood input; "
+                                    "no request was sent."
+                                )
+                            prompt_text = (
+                                sent_text[: -len(continuation)]
+                                if continuation
+                                else sent_text
+                            )
+                            prompt_tokens = self.tok_encode(prompt_text)
                             continuation_tokens = self.tok_encode(continuation)
                             prompt_budget = self.max_length - len(continuation_tokens)
                             if prompt_budget < 2:
@@ -619,19 +630,63 @@ class TemplateAPI(TemplateLM):
                                     "two prompt tokens, so middle truncation cannot "
                                     "preserve both prompt edges."
                                 )
-                            head_length = (prompt_budget + 1) // 2
-                            tail_length = prompt_budget // 2
-                            sent_tokens = sent_tokens[:head_length] + (
-                                sent_tokens[-tail_length:] if tail_length else []
-                            )
-                        sent_text = self.decode_batch([sent_tokens])[0]
-                        sent_tokens = self.tok_encode(sent_text)
-                        # A decode/re-encode pair can change the count again. Keep
-                        # the final text within the budget before sending it.
-                        if len(sent_tokens) > self.max_length:
+                            prompt_budget = min(prompt_budget, len(prompt_tokens))
+                            while prompt_budget >= 2:
+                                if prompt_budget == len(prompt_tokens):
+                                    retained_prompt = prompt_tokens
+                                else:
+                                    head_length = (prompt_budget + 1) // 2
+                                    tail_length = prompt_budget // 2
+                                    retained_prompt = prompt_tokens[:head_length]
+                                    if tail_length:
+                                        retained_prompt += prompt_tokens[-tail_length:]
+
+                                candidate_tokens = (
+                                    retained_prompt + continuation_tokens
+                                )
+                                candidate_text = self.decode_batch(
+                                    [candidate_tokens]
+                                )[0]
+                                if continuation and not candidate_text.endswith(
+                                    continuation
+                                ):
+                                    raise ValueError(
+                                        "Middle truncation did not preserve the full "
+                                        "answer-choice continuation; no request was "
+                                        "sent."
+                                    )
+
+                                sent_tokens = self.tok_encode(candidate_text)
+                                sent_text = self.decode_batch([sent_tokens])[0]
+                                final_length = len(self.tok_encode(sent_text))
+                                if (
+                                    final_length <= self.max_length
+                                    and (
+                                        not continuation
+                                        or sent_text.endswith(continuation)
+                                    )
+                                ):
+                                    break
+
+                                prompt_budget -= max(
+                                    1, final_length - self.max_length
+                                )
+                            else:
+                                raise ValueError(
+                                    "The answer-choice continuation and two prompt "
+                                    "edge tokens do not fit within the input budget; "
+                                    "no request was sent."
+                                )
+                        else:
+                            # Preserve legacy left truncation for the explicit
+                            # `truncate` policy.
                             sent_tokens = sent_tokens[-self.max_length :]
                             sent_text = self.decode_batch([sent_tokens])[0]
                             sent_tokens = self.tok_encode(sent_text)
+                            if len(sent_tokens) > self.max_length:
+                                sent_tokens = sent_tokens[-self.max_length :]
+                                sent_text = self.decode_batch([sent_tokens])[0]
+                                sent_tokens = self.tok_encode(sent_text)
 
                     inp = sent_tokens
                     continuation = cache_key[1] if isinstance(cache_key, tuple) else ""
