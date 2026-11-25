@@ -258,13 +258,31 @@ def test_string_request_retokenizes_decoded_text_before_budget_and_boundary():
     )
     api._encode_pair = MagicMock(return_value=([20, 21, 22], [23]))
 
-    inputs, ctxlens, _ = api.batch_loglikelihood_requests(
-        [[(("prompt", " A"), [1, 2, 3], [4])]]
-    )
+    with pytest.raises(
+        ValueError, match="Could not fit the decoded loglikelihood input"
+    ):
+        api.batch_loglikelihood_requests(
+            [[(("prompt", " A"), [1, 2, 3], [4])]]
+        )
 
-    assert inputs == [[20, 21, 22, 23]]
-    assert ctxlens == [3]
-    api._encode_pair.assert_called_once_with("new", " A")
+
+def test_string_final_budget_is_checked_without_initial_overflow():
+    api = LocalCompletionsAPI(
+        tokenizer_backend=None,
+        tokenized_requests=False,
+        max_length=4,
+        loglikelihood_context_overflow="error",
+    )
+    api.tokenizer = object()
+    api.decode_batch = MagicMock(
+        side_effect=[["initial text"], ["expanded final text"]]
+    )
+    api.tok_encode = MagicMock(side_effect=[[10, 11], [20, 21, 22, 23]])
+
+    with pytest.raises(ValueError, match="Final loglikelihood input has 4 tokens"):
+        api.batch_loglikelihood_requests(
+            [[(("prompt", " A"), [1], [2])]]
+        )
 
 
 def test_longbench_default_middle_truncation_preserves_string_prompt_edges_and_choice():
