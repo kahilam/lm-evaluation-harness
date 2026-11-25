@@ -40,8 +40,9 @@ For `longbenchv2` (resolved to `longbench2`), the direct harness ID `longbench2`
 and its leaf tasks, `max_length` is required and
 `loglikelihood_context_overflow` defaults to `middle`. Oversized prompts retain
 their beginning and end; answer-choice continuations are never truncated. If an
-answer choice itself leaves no room for a prompt token, the request fails before
-it is sent. `"error"` can be selected to reject oversized requests, while
+answer choice leaves fewer than two prompt tokens available, the request fails
+before it is sent because both prompt edges cannot be preserved. `"error"` can
+be selected to reject oversized requests, while
 `"truncate"` preserves the legacy left-truncation behavior. Other tasks retain
 their existing default behavior unless explicitly configured.
 

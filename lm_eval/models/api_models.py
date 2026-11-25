@@ -93,9 +93,9 @@ class TemplateAPI(TemplateLM):
         eos_string: str = None,
         # timeout in seconds
         timeout: int = 300,
-        loglikelihood_context_overflow: Literal[
-            "error", "truncate", "middle"
-        ] = "truncate",
+        loglikelihood_context_overflow: Optional[
+            Literal["error", "truncate", "middle"]
+        ] = None,
         longbench_truncation_stats: Optional[dict] = None,
         **kwargs,
     ) -> None:
@@ -128,6 +128,11 @@ class TemplateAPI(TemplateLM):
         # max_length - 1 as we always have 1 token for generation
         eval_logger.info(f"Using max length {max_length} - 1")
         self.max_length = max_length - 1
+        self.loglikelihood_context_overflow_explicit = (
+            loglikelihood_context_overflow is not None
+        )
+        if loglikelihood_context_overflow is None:
+            loglikelihood_context_overflow = "truncate"
         if loglikelihood_context_overflow not in ("error", "truncate", "middle"):
             raise ValueError(
                 "loglikelihood_context_overflow must be 'error', 'truncate', "
@@ -594,7 +599,15 @@ class TemplateAPI(TemplateLM):
                 # sending them. Decoding is not necessarily lossless for the
                 # tokenizer, so base the budget and prompt boundary on the text
                 # that will actually be sent.
-                if not self.tokenized_requests and self.tokenizer is not None:
+                validate_string_context = (
+                    self.longbench_truncation_stats is not None
+                    or self.loglikelihood_context_overflow_explicit
+                )
+                if (
+                    not self.tokenized_requests
+                    and self.tokenizer is not None
+                    and validate_string_context
+                ):
                     sent_text = self.decode_batch([inp])[0]
                     sent_tokens = self.tok_encode(sent_text)
                     retokenized_was_truncated = len(sent_tokens) > self.max_length
@@ -695,11 +708,7 @@ class TemplateAPI(TemplateLM):
                         ctxlen = len(self._encode_pair(prompt_text, continuation)[0])
                     else:
                         ctxlen = min(ctxlen, len(inp))
-                    was_truncated = (
-                        was_truncated
-                        or retokenized_was_truncated
-                        or len(inp) < len(context_enc) + len(continuation_enc)
-                    )
+                    was_truncated = was_truncated or retokenized_was_truncated
 
                 if was_truncated and self.longbench_truncation_stats is not None:
                     if sample_id:

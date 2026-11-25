@@ -112,6 +112,71 @@ def test_explicit_truncation_and_other_task_default_are_preserved():
     assert "loglikelihood_context_overflow" not in default_args
 
 
+def test_other_task_default_string_requests_keep_legacy_truncation():
+    _, model_args, _ = main.build_lmeval_config(job({}, "arc_easy"))
+    api = LocalCompletionsAPI(
+        **{
+            **model_args,
+            "tokenizer_backend": None,
+            "tokenizer": None,
+            "max_length": 4,
+        }
+    )
+    api.tokenizer = object()
+    api.decode_batch = MagicMock()
+    api.tok_encode = MagicMock()
+
+    inputs, ctxlens, _ = api.batch_loglikelihood_requests(
+        [[(("prompt", " A"), [1, 2, 3], [4])]]
+    )
+
+    assert inputs == [[2, 3, 4]]
+    assert ctxlens == [2]
+    api.decode_batch.assert_not_called()
+    api.tok_encode.assert_not_called()
+
+
+def test_explicit_non_longbench_context_policy_checks_string_budget():
+    _, model_args, _ = main.build_lmeval_config(
+        job(
+            {"max_length": 4, "loglikelihood_context_overflow": "error"},
+            "arc_easy",
+        )
+    )
+    api = LocalCompletionsAPI(
+        **{**model_args, "tokenizer_backend": None, "tokenizer": None}
+    )
+    api.tokenizer = object()
+    api.decode_batch = MagicMock(return_value=["expanded request"])
+    api.tok_encode = MagicMock(return_value=[1, 2, 3, 4])
+
+    with pytest.raises(ValueError, match="after decoding and re-tokenizing"):
+        api.batch_loglikelihood_requests(
+            [[(("prompt", " A"), [1], [2])]]
+        )
+
+
+def test_string_round_trip_shrink_is_not_counted_as_truncation():
+    stats = {"truncated_example_ids": {}, "truncated_requests": 0}
+    api = LocalCompletionsAPI(
+        tokenizer_backend=None,
+        tokenized_requests=False,
+        max_length=4,
+        loglikelihood_context_overflow="middle",
+        longbench_truncation_stats=stats,
+    )
+    api.tokenizer = object()
+    api.decode_batch = MagicMock(return_value=["shortened by tokenizer round-trip"])
+    api.tok_encode = MagicMock(return_value=[10, 11])
+
+    inputs, _, _ = api.batch_loglikelihood_requests(
+        [[(("prompt", " choice"), [1, 2], [3], ("longbench2_task", 0))]]
+    )
+
+    assert inputs == [[10, 11]]
+    assert stats == {"truncated_example_ids": {}, "truncated_requests": 0}
+
+
 def test_middle_truncation_preserves_prompt_edges_and_complete_continuations():
     stats = {"truncated_example_ids": {}, "truncated_requests": 0}
     api = LocalCompletionsAPI(
@@ -200,6 +265,49 @@ def test_string_request_retokenizes_decoded_text_before_budget_and_boundary():
     assert inputs == [[20, 21, 22, 23]]
     assert ctxlens == [3]
     api._encode_pair.assert_called_once_with("new", " A")
+
+
+def test_longbench_default_middle_truncation_preserves_string_prompt_edges_and_choice():
+    _, model_args, _ = main.build_lmeval_config(job({"max_length": 11}))
+    assert model_args["loglikelihood_context_overflow"] == "middle"
+    assert model_args["tokenized_requests"] is False
+
+    api = LocalCompletionsAPI(
+        **{**model_args, "tokenizer_backend": None, "tokenizer": None}
+    )
+    api.tokenizer = object()
+    token_pieces = {
+        1000: "aa",
+        1001: "bb",
+        1002: "cc",
+        1003: "dd",
+        1004: "ee",
+        1005: "ff",
+        1006: "gg",
+        1007: "hh",
+    }
+    api.decode_batch = MagicMock(
+        side_effect=lambda batch: [
+            "".join(token_pieces.get(token, chr(token)) for token in tokens)
+            for tokens in batch
+        ]
+    )
+    api.tok_encode = MagicMock(side_effect=lambda text: list(map(ord, text)))
+    api._encode_pair = MagicMock(
+        side_effect=lambda context, continuation: (
+            list(range(len(context))),
+            list(range(len(continuation))),
+        )
+    )
+
+    inputs, ctxlens, _ = api.batch_loglikelihood_requests(
+        [[(("prompt", "CHOICE"), list(range(1000, 1008)), list(map(ord, "CHOICE")))]]
+    )
+
+    sent_text = api.decode_batch(inputs)[0]
+    assert sent_text == "aahhCHOICE"
+    assert len(inputs[0]) <= api.max_length
+    assert ctxlens == [4]
 
 
 def test_loglikelihood_retains_task_and_document_ids(monkeypatch):
